@@ -4,6 +4,7 @@
 // =============================================================================
 
 import { API } from './api.js';
+import { analytics } from './analytics.js';
 
 // =============================================================================
 // CONFIGURATION
@@ -30,7 +31,8 @@ const State = {
     },
     currentImage: null,
     currentFile: null,
-    result: null
+    result: null,
+    isGenerating: false
 };
 
 // =============================================================================
@@ -78,16 +80,19 @@ const DOM = {
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('🚀 Perfect Insta Post v2.0 - Initialisation');
 
-    // 1. Initialiser les références DOM
+    // 1. Traduire la page
+    i18n.translatePage();
+
+    // 2. Initialiser les références DOM
     initDOM();
 
-    // 2. Charger l'authentification
+    // 3. Charger l'authentification
     await loadAuth();
 
-    // 3. Configurer les event listeners
+    // 4. Configurer les event listeners
     setupListeners();
 
-    // 4. Mettre à jour l'UI
+    // 5. Mettre à jour l'UI
     updateUI();
 
     console.log('✅ Popup initialisé');
@@ -178,7 +183,7 @@ async function loadAuth() {
 
 async function handleLogin() {
     try {
-        setButtonLoading(DOM.googleLoginBtn, true, 'Connexion en cours...');
+        setButtonLoading(DOM.googleLoginBtn, true, i18n.t('generating'));
 
         const response = await chrome.runtime.sendMessage({ type: 'LOGIN' });
 
@@ -190,15 +195,17 @@ async function handleLogin() {
             };
             API.setToken(response.token);
             updateUI();
+            showToast(i18n.t('toastConnected'), 'success');
+            analytics.capture('extension_login', { plan: response.user?.plan }, response.user);
             console.log('✅ Connexion réussie !');
         } else {
-            showToast(response.error || 'Erreur de connexion', 'error');
+            showToast(response.error || i18n.t('toastConnectionError'), 'error');
         }
     } catch (error) {
         console.error('❌ Login error:', error);
-        showToast('Erreur de connexion', 'error');
+        showToast(i18n.t('toastConnectionError'), 'error');
     } finally {
-        setButtonLoading(DOM.googleLoginBtn, false, 'Se connecter avec Google');
+        setButtonLoading(DOM.googleLoginBtn, false, i18n.t('loginBtn'));
     }
 }
 
@@ -208,7 +215,7 @@ async function handleLogout() {
         State.auth = { isAuthenticated: false, token: null, user: null };
         API.setToken(null);
         updateUI();
-        showToast('Déconnecté', 'success');
+        showToast(i18n.t('toastDisconnected'), 'success');
     } catch (error) {
         console.error('❌ Logout error:', error);
     }
@@ -235,14 +242,14 @@ function handleDrop(event) {
     if (file && CONFIG.supportedFormats.includes(file.type)) {
         processImage(file);
     } else {
-        showToast('Format non supporté (JPG, PNG, WebP uniquement)', 'error');
+        showToast(i18n.t('toastUnsupportedFormat'), 'error');
     }
 }
 
 function processImage(file) {
     // Vérifier la taille
     if (file.size > CONFIG.maxImageSize) {
-        showToast('Image trop volumineuse (max 10MB)', 'error');
+        showToast(i18n.t('toastImageTooBig'), 'error');
         return;
     }
 
@@ -274,18 +281,30 @@ function processImage(file) {
 
 async function handleGenerate() {
     if (!State.currentFile) {
-        showToast('Sélectionnez une image', 'error');
+        showToast(i18n.t('toastSelectImage'), 'error');
+        return;
+    }
+
+    // Guard anti double-clic
+    if (State.isGenerating) return;
+    State.isGenerating = true;
+
+    // Vérification offline
+    if (!navigator.onLine) {
+        showToast(i18n.t('toastOffline'), 'error');
+        State.isGenerating = false;
         return;
     }
 
     try {
-        setButtonLoading(DOM.generateBtn, true, 'Génération...');
+        setButtonLoading(DOM.generateBtn, true, i18n.t('generating'));
 
         const options = {
             postType: DOM.postTypeSelect?.value || CONFIG.defaultOptions.postType,
             tone: DOM.toneSelect?.value || CONFIG.defaultOptions.tone,
-            location: DOM.locationInput?.value?.trim() || '',
-            context: DOM.contextInput?.value?.trim() || ''
+            location: sanitize(DOM.locationInput?.value || '', 150),
+            context: sanitize(DOM.contextInput?.value || '', 150),
+            language: i18n.getCurrentLanguage()
         };
 
         console.log('🎨 Génération avec options:', options);
@@ -297,16 +316,25 @@ async function handleGenerate() {
             State.result = result;
             displayResults(result);
             show(DOM.resultsSection);
+            analytics.capture('extension_generate', {
+                post_type: options.postType,
+                tone: options.tone,
+                language: options.language,
+                has_location: !!options.location,
+                has_context: !!options.context
+            }, State.auth.user);
             console.log('✅ Généré:', result);
         } else {
-            showToast(result.error || 'Erreur de génération', 'error');
+            analytics.capture('extension_error', { action: 'generate', error: result.error }, State.auth.user);
+            showToast(result.error || i18n.t('toastGenerationError'), 'error');
         }
 
     } catch (error) {
         console.error('❌ Generate error:', error);
-        showToast('Erreur: ' + error.message, 'error');
+        showToast(i18n.t('toastGenerationError') + ': ' + error.message, 'error');
     } finally {
-        setButtonLoading(DOM.generateBtn, false, '✨ Générer le post');
+        State.isGenerating = false;
+        setButtonLoading(DOM.generateBtn, false, i18n.t('generateBtn'));
     }
 }
 
@@ -344,31 +372,32 @@ function displayResults(result) {
 
 async function handleRewrite() {
     if (!State.result?.caption) {
-        showToast('Aucune légende à réécrire', 'error');
+        showToast(i18n.t('toastNoCaption'), 'error');
         return;
     }
 
     try {
-        setButtonLoading(DOM.rewriteBtn, true, 'Réécriture...');
+        setButtonLoading(DOM.rewriteBtn, true, i18n.t('rewriting'));
 
         const tone = DOM.toneSelect?.value || 'casual';
-        const result = await API.rewriteCaption(State.result.caption, tone);
+        const result = await API.rewriteCaption(State.result.caption, tone, i18n.getCurrentLanguage());
 
         if (result.success && result.caption) {
             State.result.caption = result.caption;
             if (DOM.generatedCaption) {
                 DOM.generatedCaption.value = result.caption;
             }
-            showToast('Légende réécrite !', 'success');
+            analytics.capture('extension_rewrite', { tone }, State.auth.user);
+            showToast(i18n.t('toastCaptionRewritten'), 'success');
         } else {
-            showToast('Erreur de réécriture', 'error');
+            showToast(i18n.t('toastGenerationError'), 'error');
         }
 
     } catch (error) {
         console.error('❌ Rewrite error:', error);
-        showToast('Erreur: ' + error.message, 'error');
+        showToast(i18n.t('toastGenerationError') + ': ' + error.message, 'error');
     } finally {
-        setButtonLoading(DOM.rewriteBtn, false, '✨ Réécrire');
+        setButtonLoading(DOM.rewriteBtn, false, i18n.t('rewrite'));
     }
 }
 
@@ -417,15 +446,18 @@ function copyToClipboard(type) {
     }
 
     if (!text) {
-        showToast('Rien à copier', 'error');
+        showToast(i18n.t('toastNothingToCopy'), 'error');
         return;
     }
 
     navigator.clipboard.writeText(text)
-        .then(() => showToast('Copié !', 'success'))
+        .then(() => {
+            analytics.capture('extension_copy', { type }, State.auth.user);
+            showToast(i18n.t('toastCopied'), 'success');
+        })
         .catch(err => {
             console.error('Copy error:', err);
-            showToast('Erreur de copie', 'error');
+            showToast(i18n.t('toastGenerationError'), 'error');
         });
 }
 
@@ -448,11 +480,15 @@ function updateUI() {
             DOM.userEmail.textContent = State.auth.user.email;
         }
         if (DOM.userPlan) {
-            DOM.userPlan.textContent = State.auth.user.plan === 'pro' ? 'Pro' : 'Free';
+            DOM.userPlan.textContent = i18n.t(State.auth.user.plan === 'pro' ? 'planPro' : 'planFree');
         }
     }
 
     console.log('🎨 UI mise à jour');
+}
+
+function sanitize(str, maxLen = 150) {
+    return str.trim().substring(0, maxLen).replace(/[<>"'`]/g, '');
 }
 
 function setButtonLoading(button, isLoading, text) {
@@ -476,16 +512,26 @@ function toggle(element, visible) {
 function showToast(message, type = 'info') {
     console.log(`[${type.toUpperCase()}]`, message);
 
-    // TODO: Remplacer par un vrai système de toast
-    // Pour l'instant, utiliser alert
-    if (type === 'error') {
-        alert('❌ ' + message);
-    } else if (type === 'success') {
-        // Ne pas afficher d'alert pour les succès (UX)
-        console.log('✅', message);
-    } else {
-        alert('ℹ️ ' + message);
-    }
+    // Retirer tout toast existant
+    const existing = document.getElementById('pip-toast');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.id = 'pip-toast';
+    toast.className = `pip-toast pip-toast--${type}`;
+    toast.textContent = message;
+
+    document.body.appendChild(toast);
+
+    // Animation entrée
+    requestAnimationFrame(() => toast.classList.add('pip-toast--visible'));
+
+    // Disparition auto
+    const duration = type === 'error' ? 4000 : 2500;
+    setTimeout(() => {
+        toast.classList.remove('pip-toast--visible');
+        setTimeout(() => toast.remove(), 300);
+    }, duration);
 }
 
 console.log('📦 popup-v2.js chargé');

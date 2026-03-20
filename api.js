@@ -1,8 +1,9 @@
 // =============================================================================
-// API MODULE - Centralisation de tous les appels backend
+// API MODULE - Centralisation de tous les appels backend (JudgeMyJPEG)
 // =============================================================================
 
-const API_BASE_URL = 'https://perfect-insta-extension-production.up.railway.app';
+const API_BASE_URL = 'https://www.judgemyjpeg.fr';
+const API_TIMEOUT_MS = 30000; // 30 secondes
 
 class APIClient {
     constructor() {
@@ -10,55 +11,58 @@ class APIClient {
         this.token = null;
     }
 
-    /**
-     * Définir le token d'authentification
-     */
     setToken(token) {
         this.token = token;
     }
 
-    /**
-     * Headers par défaut pour toutes les requêtes
-     */
     getHeaders(includeContentType = true) {
         const headers = {};
-
         if (this.token) {
             headers['Authorization'] = `Bearer ${this.token}`;
         }
-
         if (includeContentType) {
             headers['Content-Type'] = 'application/json';
         }
-
         return headers;
     }
 
     /**
+     * Fetch avec timeout via AbortController
+     */
+    async fetchWithTimeout(url, options = {}) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+        try {
+            const response = await fetch(url, { ...options, signal: controller.signal });
+            clearTimeout(timer);
+            return response;
+        } catch (error) {
+            clearTimeout(timer);
+            if (error.name === 'AbortError') {
+                throw new Error('timeout');
+            }
+            throw error;
+        }
+    }
+
+    /**
      * Générer un post Instagram à partir d'une image
-     * @param {File} imageFile - Fichier image
-     * @param {Object} options - Options de génération (postType, tone, etc.)
-     * @returns {Promise<Object>} Résultat avec caption, hashtags, suggestions
      */
     async generatePost(imageFile, options = {}) {
         try {
             console.log('📡 API.generatePost:', options);
 
-            // Préparer FormData
             const formData = new FormData();
             formData.append('image', imageFile);
             formData.append('postType', options.postType || 'lifestyle');
             formData.append('tone', options.tone || 'casual');
-
-            // Ajouter options avancées si présentes
+            formData.append('language', options.language || 'en');
             if (options.location) formData.append('location', options.location);
             if (options.context) formData.append('context', options.context);
-            if (options.captionLength) formData.append('captionLength', options.captionLength);
-            if (options.captionStyle) formData.append('captionStyle', options.captionStyle);
 
-            const response = await fetch(`${this.baseUrl}/api/generate-post`, {
+            const response = await this.fetchWithTimeout(`${this.baseUrl}/api/instagram/generate`, {
                 method: 'POST',
-                headers: this.getHeaders(false), // Pas de Content-Type pour FormData
+                headers: this.getHeaders(false),
                 body: formData
             });
 
@@ -68,38 +72,34 @@ class APIClient {
             }
 
             const result = await response.json();
-
             return {
                 success: true,
-                caption: result.caption || '',
-                hashtags: result.hashtags || [],
-                suggestions: result.suggestions || [],
-                ...result
+                caption: String(result.caption || '').substring(0, 3000),
+                hashtags: Array.isArray(result.hashtags)
+                    ? result.hashtags.slice(0, 30).map(h => String(h).substring(0, 60))
+                    : [],
+                suggestions: Array.isArray(result.suggestions)
+                    ? result.suggestions.slice(0, 5).map(s => String(s).substring(0, 300))
+                    : []
             };
 
         } catch (error) {
             console.error('❌ API.generatePost error:', error);
-            return {
-                success: false,
-                error: error.message
-            };
+            return { success: false, error: error.message };
         }
     }
 
     /**
      * Réécrire une légende existante
-     * @param {string} caption - Légende à réécrire
-     * @param {string} style - Style de réécriture
-     * @returns {Promise<Object>} Nouvelle légende
      */
-    async rewriteCaption(caption, style = 'casual') {
+    async rewriteCaption(caption, style = 'casual', language = 'en') {
         try {
-            console.log('📡 API.rewriteCaption:', style);
+            console.log('📡 API.rewriteCaption:', style, language);
 
-            const response = await fetch(`${this.baseUrl}/api/rewrite-caption`, {
+            const response = await this.fetchWithTimeout(`${this.baseUrl}/api/instagram/rewrite`, {
                 method: 'POST',
                 headers: this.getHeaders(),
-                body: JSON.stringify({ caption, style })
+                body: JSON.stringify({ caption, style, language })
             });
 
             if (!response.ok) {
@@ -108,29 +108,23 @@ class APIClient {
             }
 
             const result = await response.json();
-
             return {
                 success: true,
-                caption: result.caption || caption,
-                ...result
+                caption: String(result.caption || caption).substring(0, 3000)
             };
 
         } catch (error) {
             console.error('❌ API.rewriteCaption error:', error);
-            return {
-                success: false,
-                error: error.message
-            };
+            return { success: false, error: error.message };
         }
     }
 
     /**
      * Récupérer les informations utilisateur
-     * @returns {Promise<Object>} User data
      */
     async getUserInfo() {
         try {
-            const response = await fetch(`${this.baseUrl}/api/user/me`, {
+            const response = await this.fetchWithTimeout(`${this.baseUrl}/api/users/me`, {
                 method: 'GET',
                 headers: this.getHeaders()
             });
@@ -140,86 +134,16 @@ class APIClient {
             }
 
             const result = await response.json();
-
-            return {
-                success: true,
-                user: result.user
-            };
+            return { success: true, user: result.user };
 
         } catch (error) {
             console.error('❌ API.getUserInfo error:', error);
-            return {
-                success: false,
-                error: error.message
-            };
-        }
-    }
-
-    /**
-     * Récupérer l'historique des posts
-     * @param {number} limit - Nombre de posts à récupérer
-     * @returns {Promise<Object>} Liste des posts
-     */
-    async getHistory(limit = 10) {
-        try {
-            const response = await fetch(`${this.baseUrl}/api/history?limit=${limit}`, {
-                method: 'GET',
-                headers: this.getHeaders()
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-
-            const result = await response.json();
-
-            return {
-                success: true,
-                posts: result.posts || []
-            };
-
-        } catch (error) {
-            console.error('❌ API.getHistory error:', error);
-            return {
-                success: false,
-                error: error.message
-            };
-        }
-    }
-
-    /**
-     * Créer une session de paiement Stripe
-     * @returns {Promise<Object>} URL de checkout Stripe
-     */
-    async createCheckoutSession() {
-        try {
-            const response = await fetch(`${this.baseUrl}/api/create-checkout-session`, {
-                method: 'POST',
-                headers: this.getHeaders()
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-
-            const result = await response.json();
-
-            return {
-                success: true,
-                url: result.url
-            };
-
-        } catch (error) {
-            console.error('❌ API.createCheckoutSession error:', error);
-            return {
-                success: false,
-                error: error.message
-            };
+            return { success: false, error: error.message };
         }
     }
 }
 
-// Exporter une instance unique (singleton)
+// Singleton
 export const API = new APIClient();
 
-console.log('📦 api.js chargé');
+console.log('📦 api.js chargé — backend: JudgeMyJPEG');

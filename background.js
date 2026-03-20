@@ -4,8 +4,26 @@
 // =============================================================================
 
 const CONFIG = {
-    backendUrl: 'https://perfect-insta-extension-production.up.railway.app',
+    backendUrl: 'https://www.judgemyjpeg.fr',
     authTimeout: 2 * 60 * 1000 // 2 minutes
+};
+
+// Détection de langue pour notifications
+function detectLanguage() {
+    const browserLang = navigator.language || navigator.userLanguage || 'en';
+    return browserLang.startsWith('fr') ? 'fr' : 'en';
+}
+
+// Messages de notification
+const notificationMessages = {
+    fr: {
+        title: 'Perfect Insta Post',
+        connected: '✅ Connecté ! Cliquez sur l\'icône de l\'extension pour continuer.'
+    },
+    en: {
+        title: 'Perfect Insta Post',
+        connected: '✅ Connected! Click the extension icon to continue.'
+    }
 };
 
 // État d'authentification
@@ -130,6 +148,21 @@ async function handleLogin(sendResponse) {
                                     success: true,
                                     token,
                                     user
+                                });
+
+                                // Tentative d'ouverture automatique du popup
+                                chrome.action.openPopup().catch(() => {
+                                    // Si ça échoue, afficher une notification
+                                    const lang = detectLanguage();
+                                    const messages = notificationMessages[lang];
+
+                                    chrome.notifications.create({
+                                        type: 'basic',
+                                        iconUrl: 'icons/icon48.png',
+                                        title: messages.title,
+                                        message: messages.connected,
+                                        priority: 2
+                                    });
                                 });
                             });
                         } else {
