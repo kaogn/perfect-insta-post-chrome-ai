@@ -1,0 +1,2 @@
+version: 2
+ignore-known-secrets: true
